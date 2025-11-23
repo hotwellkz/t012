@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import '../App.css'
 import { apiFetch, apiFetchJson, ApiError } from '../lib/apiClient'
 import { useToast } from '../hooks/useToast'
-import ToastContainer from './ToastContainer'
+import { ToastContainer } from './Toast'
 
 type Language = 'ru' | 'kk' | 'en'
 
@@ -208,7 +208,9 @@ const ChannelSettings: React.FC = () => {
   }
 
   return (
-    <div className="channel-settings-container">
+    <>
+      <ToastContainer toasts={toast.toasts} onRemove={toast.removeToast} />
+      <div className="channel-settings-container">
       <div className="card">
         <h2>{editingId ? 'Редактировать канал' : 'Добавить канал'}</h2>
         {error && (
@@ -896,7 +898,7 @@ const ChannelSettings: React.FC = () => {
           )}
         </div>
       </div>
-    </div>
+    </>
   )
 }
 
