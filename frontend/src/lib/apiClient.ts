@@ -1,0 +1,146 @@
+class ApiError extends Error {
+  status?: number
+  body?: unknown
+  isNetworkError: boolean
+
+  constructor(message: string, status?: number, body?: unknown, isNetworkError = false, cause?: unknown) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.body = body
+    this.isNetworkError = isNetworkError
+    if (cause) {
+      this.cause = cause
+    }
+  }
+}
+
+const rawBaseUrl = import.meta.env.VITE_API_URL?.trim()
+const API_BASE_URL = rawBaseUrl ? rawBaseUrl.replace(/\/+$/, '') : ''
+
+if (import.meta.env.PROD && !API_BASE_URL) {
+  console.warn(
+    '[apiClient] VITE_API_URL не задан. Запросы будут отправляться относительно домена фронтенда. Для production необходимо указать публичный backend URL.'
+  )
+}
+
+const isAbsoluteUrl = (url: string) => /^https?:\/\//i.test(url)
+
+export function resolveApiUrl(path: string): string {
+  if (!path) return ''
+  if (isAbsoluteUrl(path)) return path
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  return API_BASE_URL ? `${API_BASE_URL}${normalizedPath}` : normalizedPath
+}
+
+/**
+ * Выполнить запрос с retry механизмом
+ */
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  maxRetries = 3,
+  retryDelay = 1000
+): Promise<Response> {
+  let lastError: unknown
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const response = await fetch(url, options)
+      
+      // Если успешный ответ или ошибка 4xx (клиентская) - не повторяем
+      if (response.ok || (response.status >= 400 && response.status < 500)) {
+        return response
+      }
+      
+      // Для 5xx ошибок пробуем повторить
+      if (response.status >= 500) {
+        lastError = new Error(`Server error: ${response.status}`)
+        if (attempt < maxRetries - 1) {
+          await new Promise(resolve => setTimeout(resolve, retryDelay * (attempt + 1)))
+          continue
+        }
+      }
+      
+      return response
+    } catch (error) {
+      lastError = error
+      
+      // Для сетевых ошибок пробуем повторить
+      if (attempt < maxRetries - 1) {
+        await new Promise(resolve => setTimeout(resolve, retryDelay * (attempt + 1)))
+        continue
+      }
+    }
+  }
+
+  throw lastError
+}
+
+export async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
+  const targetUrl = resolveApiUrl(path)
+
+  let response: Response
+  try {
+    // Используем retry механизм для сетевых и серверных ошибок
+    response = await fetchWithRetry(targetUrl, options)
+  } catch (error) {
+    // Логируем детали ошибки для диагностики
+    const errorDetails: any = {
+      url: targetUrl,
+      path,
+      baseUrl: API_BASE_URL,
+      error: error instanceof Error ? error.message : String(error)
+    }
+    // Добавляем cause только если он доступен (ES2022+)
+    if (error instanceof Error && 'cause' in error && error.cause) {
+      errorDetails.cause = error.cause
+    }
+    console.error('[apiClient] Network error:', errorDetails)
+    throw new ApiError('NETWORK_ERROR', undefined, undefined, true, error)
+  }
+
+  if (!response.ok) {
+    let body: unknown = null
+    try {
+      const clone = response.clone()
+      const contentType = clone.headers.get('content-type') || ''
+      if (contentType.includes('application/json')) {
+        body = await clone.json()
+      } else {
+        body = await clone.text()
+      }
+    } catch {
+      // игнорируем ошибки парсинга тела
+    }
+
+    const message =
+      (typeof body === 'object' && body !== null && 'error' in body && String((body as Record<string, unknown>).error)) ||
+      (typeof body === 'object' && body !== null && 'message' in body && String((body as Record<string, unknown>).message)) ||
+      `Request failed with status ${response.status}`
+
+    throw new ApiError(message, response.status, body)
+  }
+
+  return response
+}
+
+export async function apiFetchJson<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await apiFetch(path, options)
+  const contentType = response.headers.get('content-type') || ''
+
+  if (contentType.includes('application/json')) {
+    return response.json() as Promise<T>
+  }
+
+  const text = await response.text()
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new ApiError('Unexpected response format', response.status, text)
+  }
+}
+
+export { ApiError, API_BASE_URL }
+
+
