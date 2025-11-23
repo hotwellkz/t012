@@ -611,12 +611,35 @@ router.post("/run-scheduled", async (req: Request, res: Response) => {
 
     // Получаем все каналы
     const channels = await getAllChannels();
+    
+    // Детальное логирование для диагностики
+    console.log(`[Automation] Total channels loaded: ${channels.length}`);
+    channels.forEach((ch) => {
+      const hasAutomation = !!ch.automation;
+      const isEnabled = ch.automation?.enabled === true;
+      const hasTimes = ch.automation?.times && ch.automation.times.length > 0;
+      const hasDays = ch.automation?.daysOfWeek && ch.automation.daysOfWeek.length > 0;
+      console.log(
+        `[Automation] Channel ${ch.id} (${ch.name}): automation=${hasAutomation}, enabled=${isEnabled}, times=${hasTimes}, days=${hasDays}`
+      );
+      if (ch.automation) {
+        console.log(
+          `[Automation]   Details: ${JSON.stringify({
+            enabled: ch.automation.enabled,
+            times: ch.automation.times,
+            daysOfWeek: ch.automation.daysOfWeek,
+            timeZone: ch.automation.timeZone,
+          })}`
+        );
+      }
+    });
+    
     const enabledChannels = channels.filter(
       (ch) => ch.automation?.enabled === true
     );
 
     console.log(
-      `[Automation] Found ${enabledChannels.length} channels with automation enabled`
+      `[Automation] Found ${enabledChannels.length} channels with automation enabled: ${enabledChannels.map(c => `${c.id} (${c.name})`).join(', ')}`
     );
 
     // Создаем логгер для этого запуска
@@ -645,6 +668,9 @@ router.post("/run-scheduled", async (req: Request, res: Response) => {
       try {
         const timezone = channel.automation?.timeZone || DEFAULT_TIMEZONE;
         
+        // Всегда увеличиваем счётчик обработанных каналов для всех каналов с enabled=true
+        logger.incrementChannelsProcessed();
+        
         await logger.logEvent({
           level: "info",
           step: "channel-check",
@@ -658,9 +684,8 @@ router.post("/run-scheduled", async (req: Request, res: Response) => {
             `[Automation] Channel ${channel.id} (${channel.name}) should run automation (timezone: ${timezone})`
           );
           
-          logger.incrementChannelsProcessed();
-          
           const jobId = await createAutomatedJob(channel, logger);
+          // incrementJobsCreated уже вызывается внутри createAutomatedJob
           results.push({
             channelId: channel.id,
             channelName: channel.name,
@@ -674,6 +699,12 @@ router.post("/run-scheduled", async (req: Request, res: Response) => {
             channelId: channel.id,
             channelName: channel.name,
             message: "Канал не требует запуска в текущее время",
+            details: {
+              currentTime: timeString,
+              times: channel.automation?.times,
+              daysOfWeek: channel.automation?.daysOfWeek,
+              timezone,
+            },
           });
         }
       } catch (error: any) {
@@ -682,7 +713,7 @@ router.post("/run-scheduled", async (req: Request, res: Response) => {
           error
         );
         
-        logger.incrementChannelsProcessed();
+        // Счётчик уже увеличен выше, не увеличиваем повторно
         
         await logger.logEvent({
           level: "error",

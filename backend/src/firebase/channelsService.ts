@@ -14,7 +14,17 @@ export async function getAllChannels(): Promise<Channel[]> {
     const channels: Channel[] = [];
     snapshot.forEach((doc) => {
       const data = doc.data();
-      channels.push({
+      
+      // Нормализуем automation.enabled (может быть строкой "true"/"false" или boolean)
+      let automation = data.automation;
+      if (automation && typeof automation.enabled === 'string') {
+        automation = {
+          ...automation,
+          enabled: automation.enabled === 'true' || automation.enabled === '1',
+        };
+      }
+      
+      const channel: Channel = {
         id: doc.id,
         name: data.name || "",
         description: data.description || "",
@@ -24,8 +34,17 @@ export async function getAllChannels(): Promise<Channel[]> {
         videoPromptTemplate: data.videoPromptTemplate || "",
         gdriveFolderId: data.gdriveFolderId || null,
         externalUrl: data.externalUrl || undefined,
-        automation: data.automation || undefined,
-      } as Channel);
+        automation: automation || undefined,
+      };
+      
+      // Логирование для диагностики автоматизации
+      if (channel.automation) {
+        console.log(
+          `[Firebase] Channel ${doc.id} (${channel.name}): automation exists, enabled=${channel.automation.enabled} (${typeof channel.automation.enabled})`
+        );
+      }
+      
+      channels.push(channel);
     });
 
     console.log(`[Firebase] ✅ Получено ${channels.length} каналов`);

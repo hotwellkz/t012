@@ -108,8 +108,23 @@ router.get("/run/:runId", async (req: Request, res: Response) => {
 router.get("/system", async (req: Request, res: Response) => {
   try {
     const channels = await getAllChannels();
+    
+    // Детальное логирование для диагностики
+    console.log(`[AutomationDebug] Total channels: ${channels.length}`);
+    channels.forEach((ch) => {
+      if (ch.automation) {
+        console.log(
+          `[AutomationDebug] Channel ${ch.id} (${ch.name}): automation.enabled=${ch.automation.enabled}, type=${typeof ch.automation.enabled}`
+        );
+      }
+    });
+    
     const enabledChannels = channels.filter(
       (ch) => ch.automation?.enabled === true
+    );
+    
+    console.log(
+      `[AutomationDebug] Enabled channels: ${enabledChannels.length} (${enabledChannels.map(c => `${c.id} (${c.name})`).join(', ')})`
     );
 
     const lastSuccessfulRun = await getLastSuccessfulRun();
