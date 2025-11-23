@@ -117,6 +117,27 @@ export class AutomationLogger {
   getRunId(): string {
     return this.runId;
   }
+
+  /**
+   * Получить количество обработанных каналов
+   */
+  getChannelsProcessed(): number {
+    return this.channelsProcessed;
+  }
+
+  /**
+   * Получить количество созданных задач
+   */
+  getJobsCreated(): number {
+    return this.jobsCreated;
+  }
+
+  /**
+   * Получить количество ошибок
+   */
+  getErrorsCount(): number {
+    return this.errorsCount;
+  }
 }
 
 /**

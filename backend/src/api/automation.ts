@@ -16,29 +16,43 @@ const router = Router();
 /**
  * Проверяет, нужно ли запускать автоматизацию для канала в текущее время
  * Использует timezone из настроек канала или Asia/Almaty по умолчанию
+ * Возвращает объект с результатом проверки и причинами пропуска
  */
-function shouldRunAutomation(
+interface AutomationCheckResult {
+  shouldRun: boolean;
+  reasons: string[];
+  details?: Record<string, any>;
+}
+
+async function shouldRunAutomation(
   channel: Channel,
   intervalMinutes: number = 10
-): boolean {
-  if (!channel.automation || !channel.automation.enabled) {
-    return false;
-  }
+): Promise<AutomationCheckResult> {
+  const reasons: string[] = [];
+  const details: Record<string, any> = {};
 
-  // Проверяем, не выполняется ли уже автоматизация
-  if (channel.automation.isRunning) {
-    console.log(
-      `[Automation] Channel ${channel.id} is already running, skipping`
-    );
-    return false;
+  if (!channel.automation || !channel.automation.enabled) {
+    reasons.push("automation_disabled_or_missing");
+    return { shouldRun: false, reasons, details };
   }
 
   const automation = channel.automation;
   const timezone = automation.timeZone || DEFAULT_TIMEZONE;
+  details.timezone = timezone;
+
+  // Проверяем, не выполняется ли уже автоматизация
+  if (automation.isRunning) {
+    reasons.push("already_running");
+    details.isRunning = true;
+    return { shouldRun: false, reasons, details };
+  }
 
   // Получаем текущее время в указанном timezone
   const currentTimeComponents = getCurrentTimeComponentsInTimezone(timezone);
   const currentTimeUTC = new Date();
+  const currentTimeString = formatDateInTimezone(currentTimeUTC.getTime(), timezone);
+  details.currentTime = currentTimeString;
+  details.currentTimeComponents = currentTimeComponents;
 
   // Проверяем день недели в указанном timezone
   const [currentDay, currentDayNumber] = getDayOfWeekInTimezone(
@@ -48,15 +62,39 @@ function shouldRunAutomation(
   const isDayMatch =
     automation.daysOfWeek.includes(currentDay) ||
     automation.daysOfWeek.includes(currentDayNumber);
+  
+  details.currentDay = currentDay;
+  details.currentDayNumber = currentDayNumber;
+  details.allowedDays = automation.daysOfWeek;
+  
   if (!isDayMatch) {
-    return false;
+    reasons.push("day_not_allowed");
+    return { shouldRun: false, reasons, details };
+  }
+
+  // Проверяем лимит активных задач
+  const activeJobsCount = await countActiveJobs(channel.id);
+  const maxActive = automation.maxActiveTasks || 2;
+  details.activeJobsCount = activeJobsCount;
+  details.maxActiveTasks = maxActive;
+  
+  if (activeJobsCount >= maxActive) {
+    reasons.push("max_active_jobs_reached");
+    return { shouldRun: false, reasons, details };
   }
 
   // Проверяем время
   const currentHour = currentTimeComponents.hour;
   const currentMinute = currentTimeComponents.minute;
+  const currentTotalMinutes = currentHour * 60 + currentMinute;
+
+  details.scheduledTimes = automation.times;
+  details.lastRunAt = automation.lastRunAt;
 
   // Проверяем, есть ли запланированное время в интервале
+  let foundMatchingTime = false;
+  let matchingTimeDetails: any = null;
+
   for (const scheduledTime of automation.times) {
     if (!scheduledTime || scheduledTime.trim() === "") {
       continue;
@@ -66,12 +104,17 @@ function shouldRunAutomation(
       .split(":")
       .map(Number);
 
-    // Проверяем, что время уже наступило и в пределах интервала
-    const diffMinutes =
-      (currentHour * 60 + currentMinute) - (scheduledHour * 60 + scheduledMinute);
+    const scheduledTotalMinutes = scheduledHour * 60 + scheduledMinute;
+    const diffMinutes = currentTotalMinutes - scheduledTotalMinutes;
 
+    // Проверяем, что время уже наступило и в пределах интервала (коридор после запланированного времени)
+    // Scheduler запускается каждые 5 минут, поэтому нужен коридор после запланированного времени
+    // diffMinutes >= 0 означает, что запланированное время уже прошло
+    // diffMinutes <= intervalMinutes означает, что мы ещё в пределах допустимого интервала
     if (diffMinutes >= 0 && diffMinutes <= intervalMinutes) {
       // Проверяем, не было ли уже запуска сегодня для этого времени
+      let alreadyRanToday = false;
+      
       if (automation.lastRunAt) {
         const lastRunDate = new Date(automation.lastRunAt);
         const lastRunFormatter = new Intl.DateTimeFormat("en-US", {
@@ -98,14 +141,37 @@ function shouldRunAutomation(
           lastRunHour === scheduledHour &&
           lastRunMinute === scheduledMinute
         ) {
+          alreadyRanToday = true;
+          matchingTimeDetails = {
+            scheduledTime,
+            diffMinutes,
+            alreadyRanToday: true,
+            lastRunAt: automation.lastRunAt,
+          };
           continue;
         }
       }
-      return true;
+
+      // Нашли подходящее время, которое ещё не запускалось сегодня
+      foundMatchingTime = true;
+      matchingTimeDetails = {
+        scheduledTime,
+        diffMinutes,
+        alreadyRanToday: false,
+      };
+      break;
     }
   }
 
-  return false;
+  if (!foundMatchingTime) {
+    reasons.push("time_not_due");
+    details.matchingTimeDetails = matchingTimeDetails;
+    return { shouldRun: false, reasons, details };
+  }
+
+  // Все проверки пройдены
+  details.matchingTimeDetails = matchingTimeDetails;
+  return { shouldRun: true, reasons: [], details };
 }
 
 /**
@@ -338,6 +404,10 @@ export async function createAutomatedJob(
         veoPromptResult.videoTitle
       );
 
+      console.log(
+        `[Automation] ✅ Job document created in Firestore: ${job.id} for channel ${channel.id}`
+      );
+
       // Помечаем задачу как автоматическую
       const { updateJob } = await import("../models/videoJob");
       await updateJob(job.id, { isAuto: true });
@@ -350,7 +420,7 @@ export async function createAutomatedJob(
           channelId: channel.id,
           channelName: channel.name,
           message: "Задача создана успешно",
-          details: { jobId: job.id },
+          details: { jobId: job.id, prompt: veoPromptResult.veoPrompt.substring(0, 100) },
         });
       }
     } catch (error: any) {
@@ -671,21 +741,43 @@ router.post("/run-scheduled", async (req: Request, res: Response) => {
         // Всегда увеличиваем счётчик обработанных каналов для всех каналов с enabled=true
         logger.incrementChannelsProcessed();
         
+        // Детальная проверка с логированием причин
+        const checkResult = await shouldRunAutomation(channel, intervalMinutes);
+        
+        console.log(`[Automation] Channel ${channel.id} (${channel.name}) check:`, {
+          shouldRun: checkResult.shouldRun,
+          reasons: checkResult.reasons,
+          details: checkResult.details,
+        });
+        
         await logger.logEvent({
           level: "info",
           step: "channel-check",
           channelId: channel.id,
           channelName: channel.name,
-          message: "Проверяю канал",
+          message: checkResult.shouldRun 
+            ? "Канал готов к запуску автоматизации" 
+            : `Канал пропущен: ${checkResult.reasons.join(", ")}`,
+          details: checkResult.details,
         });
         
-        if (shouldRunAutomation(channel, intervalMinutes)) {
+        if (checkResult.shouldRun) {
           console.log(
-            `[Automation] Channel ${channel.id} (${channel.name}) should run automation (timezone: ${timezone})`
+            `[Automation] ✅ Channel ${channel.id} (${channel.name}) should run automation (timezone: ${timezone})`
           );
           
           const jobId = await createAutomatedJob(channel, logger);
-          // incrementJobsCreated уже вызывается внутри createAutomatedJob
+          
+          if (jobId) {
+            console.log(
+              `[Automation] ✅ Job created for channel ${channel.id}: ${jobId}`
+            );
+          } else {
+            console.log(
+              `[Automation] ⚠️ Job creation returned null for channel ${channel.id}`
+            );
+          }
+          
           results.push({
             channelId: channel.id,
             channelName: channel.name,
@@ -693,19 +785,9 @@ router.post("/run-scheduled", async (req: Request, res: Response) => {
             timezone,
           });
         } else {
-          await logger.logEvent({
-            level: "info",
-            step: "channel-check",
-            channelId: channel.id,
-            channelName: channel.name,
-            message: "Канал не требует запуска в текущее время",
-            details: {
-              currentTime: timeString,
-              times: channel.automation?.times,
-              daysOfWeek: channel.automation?.daysOfWeek,
-              timezone,
-            },
-          });
+          console.log(
+            `[Automation] ⏭️  Channel ${channel.id} (${channel.name}) skipped: ${checkResult.reasons.join(", ")}`
+          );
         }
       } catch (error: any) {
         console.error(
@@ -748,10 +830,13 @@ router.post("/run-scheduled", async (req: Request, res: Response) => {
       });
     }
     
+    // Логируем финальную статистику
     console.log("=".repeat(80));
     console.log(`[Automation] ===== SCHEDULED AUTOMATION CHECK COMPLETED =====`);
-    console.log(`[Automation] Processed: ${results.length} channels`);
-    console.log(`[Automation] Jobs created: ${jobsCreated}`);
+    console.log(`[Automation] Channels planned: ${enabledChannels.length}`);
+    console.log(`[Automation] Channels processed: ${logger.getChannelsProcessed()}`);
+    console.log(`[Automation] Jobs created: ${logger.getJobsCreated()}`);
+    console.log(`[Automation] Errors: ${logger.getErrorsCount()}`);
     console.log(`[Automation] Duration: ${duration}ms`);
     console.log(`[Automation] Run ID: ${logger.getRunId()}`);
     console.log("=".repeat(80));
