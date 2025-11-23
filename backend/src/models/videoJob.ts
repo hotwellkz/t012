@@ -8,6 +8,7 @@ export type VideoJobStatus =
   | "uploaded"         // Загружено в Google Drive
   | "rejected"         // Отклонено пользователем
   | "syntax_timeout"   // Таймаут ожидания видео от Syntax
+  | "cancelled"        // Отменено вручную
   | "error";           // Ошибка
 
 export type MatchingMethod = "jobId" | "timestamp";

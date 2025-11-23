@@ -2305,6 +2305,12 @@
   transition: all 0.3s ease;
 }
 
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .automation-block--enabled {
   border-color: #667eea;
   background: #f0f4ff;

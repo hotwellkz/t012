@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import '../App.css'
 import { apiFetch, apiFetchJson, ApiError } from '../lib/apiClient'
+import { useToast } from '../hooks/useToast'
 
 type Language = 'ru' | 'kk' | 'en'
 
@@ -38,6 +39,7 @@ const ChannelSettings: React.FC = () => {
   const [error, setError] = useState<string>('')
   const [success, setSuccess] = useState<string>('')
   const [editingId, setEditingId] = useState<string | null>(null)
+  const toast = useToast()
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -379,9 +381,128 @@ const ChannelSettings: React.FC = () => {
             {formData.automation.enabled && (
               <div className="automation-status">
                 {formData.automation.isRunning ? (
-                  <div className="automation-status__running">
-                    <span className="automation-status__indicator automation-status__indicator--running"></span>
-                    <span className="automation-status__text">Автоматизация выполняется...</span>
+                  <div className="automation-status__running" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span className="automation-status__indicator automation-status__indicator--running"></span>
+                      <span className="automation-status__text">Автоматизация выполняется...</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!editingId) return;
+                        
+                        const confirmed = window.confirm(
+                          'Остановить автоматизацию для этого канала?\n\nВсе незавершённые задачи будут отменены.'
+                        );
+                        
+                        if (!confirmed) return;
+                        
+                        setLoading(true);
+                        setError('');
+                        
+                        try {
+                          const result = await apiFetchJson<{ ok: boolean; cancelledTasks: number; message?: string; error?: string }>(
+                            '/api/automation/stop-channel',
+                            {
+                              method: 'POST',
+                              headers: {
+                                'Content-Type': 'application/json',
+                              },
+                              body: JSON.stringify({ channelId: editingId }),
+                            }
+                          );
+                          
+                          if (result.ok) {
+                            setSuccess(result.message || `Автоматизация остановлена. Отменено задач: ${result.cancelledTasks}`);
+                            
+                            // Обновляем состояние канала
+                            setFormData({
+                              ...formData,
+                              automation: {
+                                ...formData.automation,
+                                enabled: false,
+                                isRunning: false,
+                              },
+                            });
+                            
+                            // Обновляем данные канала с сервера
+                            setTimeout(() => {
+                              fetchChannels();
+                              if (editingId) {
+                                const channel = channels.find(c => c.id === editingId);
+                                if (channel) {
+                                  setFormData({
+                                    ...formData,
+                                    automation: channel.automation || formData.automation,
+                                  });
+                                }
+                              }
+                            }, 500);
+                            
+                            // Показываем toast (если есть система toast)
+                            if (toast) {
+                              toast.success(`Автоматизация для канала остановлена. Отменено задач: ${result.cancelledTasks}`);
+                            }
+                          } else {
+                            throw new Error(result.error || 'Не удалось остановить автоматизацию');
+                          }
+                        } catch (err) {
+                          const errorMsg = getErrorMessage(err);
+                          setError(errorMsg);
+                          console.error('[ChannelSettings] Error stopping automation:', err);
+                          
+                          // Показываем toast с ошибкой
+                          if (toast) {
+                            toast.error('Не удалось остановить автоматизацию. Попробуйте позже.');
+                          }
+                        } finally {
+                          setLoading(false);
+                        }
+                      }}
+                      disabled={loading}
+                      style={{
+                        padding: '6px 12px',
+                        backgroundColor: 'transparent',
+                        color: '#ef4444',
+                        border: '1px solid #ef4444',
+                        borderRadius: '4px',
+                        cursor: loading ? 'not-allowed' : 'pointer',
+                        fontSize: '13px',
+                        fontWeight: '500',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        opacity: loading ? 0.6 : 1,
+                        transition: 'all 0.2s',
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!loading) {
+                          e.currentTarget.style.backgroundColor = '#fee2e2';
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!loading) {
+                          e.currentTarget.style.backgroundColor = 'transparent';
+                        }
+                      }}
+                    >
+                      {loading ? (
+                        <>
+                          <span style={{ display: 'inline-block', width: '12px', height: '12px', border: '2px solid #ef4444', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }}></span>
+                          Остановка...
+                        </>
+                      ) : (
+                        <>
+                          <span>⏹</span>
+                          Остановить автоматизацию
+                        </>
+                      )}
+                    </button>
+                  </div>
+                ) : formData.automation.manualStoppedAt ? (
+                  <div className="automation-status__idle" style={{ backgroundColor: '#fef3c7', border: '1px solid #f59e0b', borderRadius: '4px', padding: '8px 12px' }}>
+                    <span className="automation-status__indicator" style={{ backgroundColor: '#f59e0b }}></span>
+                    <span className="automation-status__text">Автоматизация остановлена вручную</span>
                   </div>
                 ) : (
                   <div className="automation-status__idle">

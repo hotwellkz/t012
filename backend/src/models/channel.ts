@@ -13,6 +13,7 @@ export interface ChannelAutomation {
   nextRunAt?: number | null; // Timestamp следующего запланированного запуска
   isRunning?: boolean; // Флаг, что автоматизация сейчас выполняет цикл
   runId?: string | null; // ID текущего запуска для отслеживания
+  manualStoppedAt?: number | null; // Timestamp ручной остановки автоматизации
 }
 
 export interface Channel {

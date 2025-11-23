@@ -1079,5 +1079,119 @@ router.post("/reset-running-flags", async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * POST /api/automation/stop-channel
+ * Ручная остановка автоматизации для конкретного канала
+ */
+router.post("/stop-channel", async (req: Request, res: Response) => {
+  try {
+    const { channelId } = req.body;
+    
+    if (!channelId || typeof channelId !== "string") {
+      return res.status(400).json({
+        ok: false,
+        error: "Требуется channelId",
+      });
+    }
+    
+    console.log(`[Automation] Manual stop requested for channel ${channelId}`);
+    
+    // Проверяем, что канал существует
+    const channel = await getChannelById(channelId);
+    if (!channel) {
+      return res.status(404).json({
+        ok: false,
+        error: "Канал не найден",
+      });
+    }
+    
+    // Обновляем документ канала
+    const { updateChannel } = await import("../models/channel");
+    await updateChannel(channelId, {
+      automation: {
+        ...channel.automation!,
+        enabled: false,
+        isRunning: false,
+        runId: null,
+        manualStoppedAt: Date.now(),
+      },
+    });
+    
+    console.log(`[Automation] ✅ Channel ${channelId} automation disabled`);
+    
+    // Находим все незавершённые авто-задачи для этого канала
+    const { getAllJobs, updateJob } = await import("../models/videoJob");
+    const allJobs = await getAllJobs(channelId);
+    
+    const activeStatuses: import("../models/videoJob").VideoJobStatus[] = [
+      "queued",
+      "sending",
+      "waiting_video",
+      "downloading",
+      "uploading",
+    ];
+    
+    const unfinishedAutoJobs = allJobs.filter(
+      (job) => job.isAuto === true && activeStatuses.includes(job.status)
+    );
+    
+    console.log(
+      `[Automation] Found ${unfinishedAutoJobs.length} unfinished auto jobs for channel ${channelId}`
+    );
+    
+    // Отменяем все незавершённые задачи
+    let cancelledCount = 0;
+    for (const job of unfinishedAutoJobs) {
+      try {
+        await updateJob(job.id, {
+          status: "cancelled",
+          errorMessage: "Отменено вручную (остановка автоматизации)",
+          updatedAt: Date.now(),
+        });
+        cancelledCount++;
+        console.log(`[Automation] ✅ Cancelled job ${job.id} for channel ${channelId}`);
+      } catch (error: any) {
+        console.error(
+          `[Automation] ⚠️ Failed to cancel job ${job.id}:`,
+          error.message
+        );
+      }
+    }
+    
+    // Логируем событие остановки (если есть система логирования)
+    try {
+      const { createAutomationEvent } = await import("../firebase/automationRunsService");
+      await createAutomationEvent({
+        runId: "manual-stop",
+        level: "info",
+        step: "other",
+        channelId: channelId,
+        channelName: channel.name,
+        message: "Автоматизация остановлена вручную",
+        details: {
+          cancelledTasks: cancelledCount,
+          stoppedAt: Date.now(),
+        },
+      });
+    } catch (logError) {
+      console.warn("[Automation] Failed to log manual stop event:", logError);
+    }
+    
+    res.json({
+      ok: true,
+      cancelledTasks: cancelledCount,
+      channelId: channelId,
+      message: `Автоматизация остановлена. Отменено задач: ${cancelledCount}`,
+    });
+  } catch (error: any) {
+    console.error("[Automation] Error stopping channel automation:", error);
+    res.status(500).json({
+      ok: false,
+      error: "Ошибка при остановке автоматизации",
+      message: error.message,
+    });
+  }
+});
+
 export default router;
 
